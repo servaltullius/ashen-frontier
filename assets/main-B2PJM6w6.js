@@ -4615,6 +4615,8 @@ float fGroundSnow(vec2 p){ return fbm(p * 0.38 + 80.0); }
 #define BUMP_STEP 0.012
 float slabMask(vec2 p){
 	float d = length(p - uPlaza.xy);
+	// 노이즈가 경계를 흔드는 폭(±2.75m)으로도 닿지 않는 먼 곳은 0 이다(노이즈를 돌리지 않는다)
+	if (d > uPlaza.z + 4.2) return 0.0;
 	return smoothstep(uPlaza.z + 1.4, uPlaza.z - 1.8, d + (fbm(p * 0.45 + 3.1) - 0.5) * 5.5);
 }
 // 깔린 돌: x = 돌 윗면(1)·틈(0), y = 돌마다 다른 값, z = 가장자리까지의 거리(m), w = 돌이 기운 만큼의 높이(m)
@@ -4643,13 +4645,23 @@ float pebble(vec2 p, float sc, out float id){
 // 마당 바닥의 모양: 높이와, 색을 낼 때도 쓰는 값들(잔결·자갈·깔린 돌·돌 조각)
 void groundShape(vec2 p, out float h, out float fine, out float peb, out float pid, out float m, out vec4 s, out float present, out float top, out float chips){
 	fine = vnoise(p * 22.0);
-	peb = pebble(p + (vec2(vnoise(p * 3.1), vnoise(p * 3.1 + 40.0)) - 0.5) * 0.16, 6.5, pid);
-	peb *= smoothstep(0.50, 0.66, fbm(p * 0.9 + 9.0)) * step(0.35, pid);
+	// 결과에 0 이 곱해지는 곳은 계산을 건너뛴다(바닥은 화면의 대부분이고 화소마다 법선용으로 세 번 부른다 — 성능 진단 ?perf).
+	// 자갈은 덩어리 노이즈가 있는 곳에만: 밖에서는 높이도 색도 자갈이 0 이다
+	float lump = smoothstep(0.50, 0.66, fbm(p * 0.9 + 9.0));
+	peb = 0.0; pid = 0.0;
+	if (lump > 0.0) {
+		peb = pebble(p + (vec2(vnoise(p * 3.1), vnoise(p * 3.1 + 40.0)) - 0.5) * 0.16, 6.5, pid);
+		peb *= lump * step(0.35, pid);
+	}
+	// 깔린 돌은 마당 안에만: 밖에서는 돌이 놓였는가(present)·윗면(top)이 0 이다
 	m = slabMask(p);
-	s = slabs(p);
-	present = step(s.y, m * 1.12 - 0.2);
-	top = s.x * present;
-	chips = fbm(p * 3.3 + 50.0);
+	s = vec4(0.0, 1.0, 0.0, 0.0); present = 0.0; top = 0.0; chips = 0.5;
+	if (m * 1.12 - 0.2 > 0.0) {
+		s = slabs(p);
+		present = step(s.y, m * 1.12 - 0.2);
+		top = s.x * present;
+		chips = fbm(p * 3.3 + 50.0);
+	}
 	h = (fbm(p * 2.2) * 0.5 + fine * 0.12) * 0.035 * (1.0 - top)
 		+ peb * 0.028 * (1.0 - top)
 		+ top * (0.05 + (chips - 0.5) * 0.022 + (fine - 0.5) * 0.004 + (s.y - 0.5) * 0.014 + s.w);
@@ -4673,15 +4685,17 @@ void groundSurf(vec2 p, out float h, out vec3 col, out float rough){
 	// 자갈
 	vec3 pebC = mix(vec3(0.10, 0.095, 0.09), vec3(0.20, 0.185, 0.165), pid);
 	col = mix(dirt, pebC * (0.55 + 0.45 * peb), smoothstep(0.08, 0.40, peb));
-	// 깔린 돌: 돌마다 색이 조금씩 다르고, 가장자리에 이끼가 낀다. 틈은 어둡다
-	vec3 slabC = mix(vec3(0.115, 0.115, 0.125), vec3(0.20, 0.19, 0.175), s.y) * (0.66 + 0.68 * chips) * (0.84 + 0.32 * fine);
-	slabC = mix(slabC, mossC * 1.2, moss * 0.7 * ${AT} * smoothstep(0.20, 0.02, s.z));
-	// 가는 균열은 일부 돌에만
-	slabC *= 1.0 - 0.6 * smoothstep(0.011, 0.0, abs(fbm(p * 1.9 + s.y * 31.0) - 0.5)) * step(0.62, s.y);
-	// 돌 위에 쌓인 흙먼지
-	float dust = smoothstep(0.50, 0.72, fbm(p * 1.3 + 70.0)) * 0.75;
-	slabC = mix(slabC, dirt * 1.05, dust);
-	col = mix(col, slabC, top);
+	// 깔린 돌: 돌마다 색이 조금씩 다르고, 가장자리에 이끼가 낀다. 틈은 어둡다(돌 윗면이 없는 곳은 섞이지 않으므로 건너뛴다)
+	if (top > 0.0) {
+		vec3 slabC = mix(vec3(0.115, 0.115, 0.125), vec3(0.20, 0.19, 0.175), s.y) * (0.66 + 0.68 * chips) * (0.84 + 0.32 * fine);
+		slabC = mix(slabC, mossC * 1.2, moss * 0.7 * ${AT} * smoothstep(0.20, 0.02, s.z));
+		// 가는 균열은 일부 돌에만
+		slabC *= 1.0 - 0.6 * smoothstep(0.011, 0.0, abs(fbm(p * 1.9 + s.y * 31.0) - 0.5)) * step(0.62, s.y);
+		// 돌 위에 쌓인 흙먼지
+		float dust = smoothstep(0.50, 0.72, fbm(p * 1.3 + 70.0)) * 0.75;
+		slabC = mix(slabC, dirt * 1.05, dust);
+		col = mix(col, slabC, top);
+	}
 	col *= mix(1.0, 0.40, present * (1.0 - s.x));
 	// 젖은 자리: 어둡고 매끈해서 달빛이 번들거린다
 	float damp = smoothstep(0.52, 0.34, fGroundDamp(p));
